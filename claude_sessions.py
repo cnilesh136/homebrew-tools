@@ -4,16 +4,16 @@
 Scans ~/.claude/projects/*/<session-id>.jsonl transcripts, enriches them with
 live-process info from ~/.claude/sessions/<pid>.json.
 
-Usage:
-  claude_sessions.py                     # interactive picker (when on a TTY)
-  claude_sessions.py list                # table of all sessions, newest first
-  claude_sessions.py list --json         # machine-readable output
-  claude_sessions.py list --running      # only sessions with a live process
-  claude_sessions.py list --project X    # filter by project path substring
-  claude_sessions.py show <id-prefix>    # full detail for one session (JSON)
-  claude_sessions.py resume <id-prefix>  # resume a session (execs `claude --resume`)
-  claude_sessions.py delete <id-prefix>  # delete a session transcript (--yes to skip confirm)
-  claude_sessions.py new [directory]     # start a new session (execs `claude`)
+Usage (installed as `claude-sessions`, short alias `cs`):
+  cs                          # interactive picker (when on a TTY)
+  cs list                     # table of all sessions, newest first
+  cs list --json              # machine-readable output
+  cs list --running           # only sessions with a live process
+  cs list --project X         # filter by project path substring
+  cs show <id-prefix>         # full detail for one session (JSON)
+  cs resume <id-prefix>       # resume a session (execs `claude --resume`)
+  cs delete <id-prefix>       # delete a session transcript (--yes to skip confirm)
+  cs new [directory]          # start a new session (execs `claude`)
 
 Interactive keys:
   up/down or j/k  move        Enter/r  resume selected
