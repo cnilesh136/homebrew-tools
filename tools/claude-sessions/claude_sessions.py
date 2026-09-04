@@ -337,12 +337,32 @@ def print_search(results, query):
 
 # ---------------------------------------------------------------- watch
 
-def notify_mac(message, subtitle=""):
+def humanize_duration(secs):
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
+
+
+def notify_mac(title, message, subtitle=""):
     if sys.platform != "darwin":
+        return
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        # Rich notification: Claude's own app icon, grouped so new ones
+        # replace old, clicking brings the Claude app forward.
+        subprocess.run(
+            [tn, "-title", title, "-subtitle", subtitle, "-message", message,
+             "-sound", "Glass", "-group", "claude-sessions",
+             "-sender", "com.anthropic.claudefordesktop",
+             "-activate", "com.anthropic.claudefordesktop"],
+            capture_output=True)
         return
     def esc(t):
         return (t or "").replace("\\", "\\\\").replace('"', '\\"')
-    script = (f'display notification "{esc(message)}" with title "Claude Code" '
+    script = (f'display notification "{esc(message)}" with title "{esc(title)}" '
               f'subtitle "{esc(subtitle)}" sound name "Glass"')
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
@@ -353,21 +373,29 @@ def watch(interval=3.0, quiet=False):
 
     log(f"watching {LIVE_DIR} every {interval:g}s (Ctrl-C to stop)")
     prev = load_live_sessions()
+    busy_since = {sid: time.time() for sid, i in prev.items()
+                  if i.get("status") == "busy"}
     while True:
         time.sleep(interval)
         live = load_live_sessions()
         for sid, info in live.items():
             old = prev.get(sid)
             label = info.get("name") or shorten_project(info.get("cwd")) or sid[:8]
+            if info.get("status") == "busy":
+                busy_since.setdefault(sid, time.time())
             if old is None:
                 log(f"session started: {label} ({info.get('status')})")
             elif old.get("status") == "busy" and info.get("status") == "idle":
-                log(f"finished: {label}")
+                took = time.time() - busy_since.pop(sid, time.time())
+                log(f"finished: {label} (turn took {humanize_duration(took)})")
                 if not quiet:
-                    notify_mac(f"{label} finished its turn",
-                               subtitle=info.get("cwd") or "")
+                    notify_mac(f"✅ {label} finished",
+                               f"Turn took {humanize_duration(took)} — "
+                               f"ready for you",
+                               subtitle=shorten_project(info.get("cwd")))
         for sid, old in prev.items():
             if sid not in live:
+                busy_since.pop(sid, None)
                 label = old.get("name") or shorten_project(old.get("cwd")) or sid[:8]
                 log(f"session ended: {label}")
         prev = live
@@ -723,9 +751,44 @@ def print_help():
 # ---------------------------------------------------------------- interactive mode
 
 _preview_cache = {}
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def get_key(fd):
+def cost_color(c):
+    if c >= 50:
+        return RED
+    if c >= 1:
+        return YELLOW
+    return DIM
+
+
+def activity_spark(days=14):
+    """Prompts-per-day sparkline for the last `days` days, from history.jsonl."""
+    hist = CLAUDE_DIR / "history.jsonl"
+    counts = [0] * days
+    now = time.time()
+    try:
+        with open(hist, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    ts = json.loads(line).get("timestamp", 0) / 1000
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                age = int((now - ts) // 86400)
+                if 0 <= age < days:
+                    counts[days - 1 - age] += 1
+    except OSError:
+        return ""
+    if not any(counts):
+        return ""
+    blocks = "▁▂▃▄▅▆▇█"
+    mx = max(counts)
+    return "".join(blocks[min(7, round(c / mx * 7))] for c in counts)
+
+
+def get_key(fd, timeout=None):
+    if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+        return None  # tick — no key pressed
     ch = os.read(fd, 1)
     if ch != b"\x1b":
         try:
@@ -797,7 +860,7 @@ def preview_lines(s, width, height):
     return lines[-height:]
 
 
-def draw(sessions, sel, top, status, query="", prompt=None):
+def draw(sessions, sel, top, status, query="", prompt=None, tick=0, spark=""):
     cols, rows = shutil.get_terminal_size()
     show_preview = rows >= 18 and sessions
     ph = min(12, rows // 3) if show_preview else 0
@@ -810,6 +873,8 @@ def draw(sessions, sel, top, status, query="", prompt=None):
             f"{BOLD}{len(sessions)}{RESET}{DIM} sessions{RESET}   "
             f"{GREEN}●{RESET} {BOLD}{running}{RESET}{DIM} running{RESET}   "
             f"{YELLOW}~${total_cost:,.0f}{RESET}{DIM} lifetime{RESET}")
+    if spark:
+        head += f"   {CYAN}{spark}{RESET}{DIM} 14d{RESET}"
     if query:
         head += f"   {MAGENTA}⌕ {query}{RESET}{DIM}  Esc clears{RESET}"
     out.append(head + "\r\n")
@@ -823,10 +888,11 @@ def draw(sessions, sel, top, status, query="", prompt=None):
     for i in range(top, min(top + visible, len(sessions))):
         s = sessions[i]
         busy = s["running"] and (s.get("live") or {}).get("status") == "busy"
-        mark = "●" if s["running"] else "·"
+        mark = SPINNER[tick % len(SPINNER)] if busy else ("●" if s["running"] else "·")
         sid = f"{s['session_id'][:8]:<8}"
         when = f"{humanize_time(s['last_activity']):>9}"
-        cost = f"{humanize_cost(s.get('cost_usd', 0)):>7}"
+        cost_val = s.get("cost_usd", 0) or 0
+        cost = f"{humanize_cost(cost_val):>7}"
         proj = f"{shorten_project(s['project']):<26.26}"
         title = display_title(s)[:title_w]
         if i == sel:
@@ -836,7 +902,7 @@ def draw(sessions, sel, top, status, query="", prompt=None):
             mcol = (YELLOW if busy else GREEN) if s["running"] else DIM
             tcol = BOLD if s["running"] else ""
             out.append(f" {mcol}{mark}{RESET} {DIM}{sid}{RESET}  {DIM}{when}{RESET}  "
-                       f"{YELLOW}{cost}{RESET}  {CYAN}{proj}{RESET}  "
+                       f"{cost_color(cost_val)}{cost}{RESET}  {CYAN}{proj}{RESET}  "
                        f"{tcol}{title}{RESET}\r\n")
     if not sessions:
         out.append(f"\r\n   {DIM}Nothing here yet.{RESET}\r\n"
@@ -865,9 +931,11 @@ def draw(sessions, sel, top, status, query="", prompt=None):
         out.append(" " + status + RESET)
     else:
         keys = "   ".join(f"{BOLD}{CYAN}{k}{RESET}{DIM} {v}{RESET}" for k, v in [
-            ("⏎", "resume"), ("/", "search"), ("n", "new"),
-            ("d", "delete"), ("j/k", "move"), ("q", "quit")])
-        out.append(" " + keys)
+            ("⏎", "resume"), ("/", "search"), ("n", "new"), ("e", "export"),
+            ("d", "delete"), ("q", "quit")])
+        pos = f"{DIM}{min(sel + 1, len(sessions))}/{len(sessions)}{RESET}" \
+            if sessions else ""
+        out.append(" " + keys + "   " + pos)
     sys.stdout.write("".join(out))
     sys.stdout.flush()
 
@@ -893,6 +961,8 @@ def interactive():
     view = all_sessions
     query = ""
     sel, top, status = 0, 0, ""
+    tick = 0
+    spark = activity_spark()
     raw_on()
     try:
         while True:
@@ -903,9 +973,18 @@ def interactive():
             top = max(0, min(top, sel))
             if sel >= top + visible:
                 top = sel - visible + 1
-            draw(view, sel, top, status, query)
+            draw(view, sel, top, status, query, tick=tick, spark=spark)
+            key = get_key(fd, timeout=1.0)
+
+            if key is None:  # tick: animate spinners, refresh live status
+                tick += 1
+                live = load_live_sessions()
+                for s in all_sessions:
+                    info = live.get(s["session_id"])
+                    s["running"] = bool(info)
+                    s["live"] = info
+                continue
             status = ""
-            key = get_key(fd)
 
             if key == "q":
                 return 0
@@ -947,9 +1026,17 @@ def interactive():
                 raw_on()
                 all_sessions = collect_sessions()
                 view = search_sessions(all_sessions, query) if query else all_sessions
+            elif key == "e" and view:
+                s = view[sel]
+                out_path = Path.cwd() / f"claude-session-{s['session_id'][:8]}.md"
+                try:
+                    out_path.write_text(export_markdown(s))
+                    status = f"{GREEN}✓{RESET} Exported → {out_path}"
+                except OSError as exc:
+                    status = f"{RED}✗{RESET} Export failed: {exc}"
             elif key == "d" and view:
                 s = view[sel]
-                draw(view, sel, top, "", query,
+                draw(view, sel, top, "", query, tick=tick, spark=spark,
                      prompt=f" Delete {s['session_id'][:8]} ({display_title(s)[:40]})? y/N ")
                 if get_key(fd) == "y":
                     ok, msg = delete_session(s)

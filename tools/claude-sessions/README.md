@@ -63,15 +63,24 @@ Full-screen picker (alternate screen, restores your terminal on exit):
 | Enter or r     | resume selected session in its project dir      |
 | /              | full-text search filter across transcripts      |
 | n              | start a new session (prompts for directory)     |
+| e              | export selected session to Markdown (in cwd)    |
 | d              | delete selected session's transcript (confirms) |
 | q              | quit (Esc clears an active search filter first) |
 
-A preview pane at the bottom shows the last few messages of the selected
-session. Running sessions are shown in green and sorted to the top; deleting
-a running session is refused until you quit it.
+The picker is live: busy sessions show an animated spinner (yellow), idle
+running sessions a green ●, and status refreshes every second — the preview
+pane updates as a running session produces output. The header shows a 14-day
+activity sparkline and your lifetime spend; costs are heat-colored (red ≥ $50).
 
-Table columns: session id (short), project, title (custom title or first prompt),
-last activity, message count, output tokens, model(s), running state.
+A preview pane at the bottom shows the last few messages of the selected
+session. Deleting a running session is refused until you quit it.
+
+## Notifications
+
+`cs watch` (or the brew service) sends a rich macOS notification when a
+running session finishes its turn — Claude's app icon, the session name,
+and how long the turn took (via `terminal-notifier`, installed automatically
+as a brew dependency; falls back to plain osascript without it).
 
 ## Notes
 
