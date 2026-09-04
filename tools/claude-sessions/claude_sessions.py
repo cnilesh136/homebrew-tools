@@ -635,18 +635,93 @@ def print_table(sessions):
                "OUT-TOK", "COST", "MODEL", "STATE"]
     widths = [max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*headers))
-    print(fmt.format(*("-" * w for w in widths)))
-    for r in rows:
-        print(fmt.format(*r))
+    tty = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    print((DIM if tty else "") + fmt.format(*headers) + (RESET if tty else ""))
+    print((DIM if tty else "") + fmt.format(*("-" * w for w in widths))
+          + (RESET if tty else ""))
+    for s, r in zip(sessions, rows):
+        line = fmt.format(*r)
+        if tty and s["running"]:
+            line = GREEN + line + RESET
+        print(line)
     running = sum(1 for s in sessions if s["running"])
     total_cost = sum(s.get("cost_usd", 0) for s in sessions)
-    print(f"\n{len(sessions)} sessions, {running} running, ~${total_cost:.2f} total")
+    print(f"\n{len(sessions)} sessions, {running} running, ~${total_cost:.2f} total"
+          + ((DIM + "   (try `cs` for the interactive picker)" + RESET)
+             if tty else ""))
+
+
+# ---------------------------------------------------------------- colors & help
+
+RESET, BOLD, DIM, REV = "\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"
+RED, GREEN, YELLOW = "\x1b[31m", "\x1b[32m", "\x1b[33m"
+BLUE, MAGENTA, CYAN = "\x1b[34m", "\x1b[35m", "\x1b[36m"
+
+COMMANDS = {
+    "list":        "table of all sessions — cost, tokens, running state",
+    "search":      "full-text search every conversation you ever had",
+    "show":        "full JSON detail for one session",
+    "resume":      "jump back into a session, right in its project dir",
+    "new":         "start a fresh Claude session in any directory",
+    "delete":      "remove a session transcript (asks first)",
+    "watch":       "get notified the moment a running session finishes",
+    "prune":       "sweep away empty or stale sessions",
+    "export":      "turn a conversation into shareable Markdown",
+    "stats":       "tokens + cost breakdown by project and model",
+    "interactive": "the full-screen picker (same as bare `cs`)",
+    "help":        "this screen",
+}
+
+
+def print_help():
+    t = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+    def c(text, *codes):
+        return ("".join(codes) + text + RESET) if t else text
+
+    print()
+    print("  " + c(" ◆ claude-sessions ", REV, BOLD)
+          + "  " + c("mission control for your Claude Code sessions", DIM))
+    print()
+    print("  " + c("USAGE", BOLD, YELLOW))
+    print(f"    {c('cs', BOLD, CYAN)}                        "
+          + c("open the interactive picker", DIM))
+    print(f"    {c('cs', BOLD, CYAN)} {c('<command> [arg] [flags]', CYAN)}")
+    print()
+    print("  " + c("COMMANDS", BOLD, YELLOW))
+    for cmd, desc in COMMANDS.items():
+        print(f"    {c(f'{cmd:<12}', BOLD, CYAN)}{desc}")
+    print()
+    print("  " + c("POPULAR FLAGS", BOLD, YELLOW))
+    for flag, desc in [
+        ("--json", "machine-readable output (list/search/show)"),
+        ("--running", "only live sessions"),
+        ("--project X", "filter by project path substring"),
+        ("--older-than N", "prune sessions idle for N days"),
+        ("--yes", "skip confirmations (delete/prune)"),
+        ("-o FILE", "export destination ('-' for stdout)"),
+    ]:
+        print(f"    {c(f'{flag:<16}', CYAN)}{c(desc, DIM)}")
+    print()
+    print("  " + c("TRY THIS", BOLD, YELLOW))
+    for ex, desc in [
+        ("cs", "browse & resume — green dot = running"),
+        ('cs search "that bug"', "find any conversation, ever"),
+        ("cs stats", "see what your sessions really cost"),
+        ("brew services start claude-sessions",
+         "desktop ping when Claude finishes a turn"),
+    ]:
+        print(f"    {c(f'{ex:<38}', GREEN)}{c(desc, DIM)}")
+    print()
+    print("  " + c("PICKER KEYS", BOLD, YELLOW) + "   "
+          + "   ".join(c(k, BOLD, CYAN) + c(" " + v, DIM) for k, v in [
+              ("⏎", "resume"), ("/", "search"), ("n", "new"),
+              ("d", "delete"), ("j/k", "move"), ("q", "quit")]))
+    print()
 
 
 # ---------------------------------------------------------------- interactive mode
 
-REV, GREEN, DIM, RESET = "\x1b[7m", "\x1b[32m", "\x1b[2m", "\x1b[0m"
 _preview_cache = {}
 
 
@@ -701,24 +776,24 @@ def tail_messages(path, want=6, chunk=262_144):
 
 
 def preview_lines(s, width, height):
-    """Wrapped preview of the selected session's last messages."""
+    """Wrapped preview of the selected session's last messages as
+    (role, is_first_line, text) tuples."""
     path = s.get("transcript")
     if not path:
-        return ["(no transcript yet)"]
+        return [("", True, "(no transcript yet — brand-new session)")]
     key = (s["session_id"], os.path.getsize(path) if os.path.exists(path) else 0)
     if key not in _preview_cache:
         _preview_cache.clear()  # keep at most one entry
         _preview_cache[key] = tail_messages(path)
     msgs = _preview_cache[key]
     if not msgs:
-        return ["(no messages)"]
+        return [("", True, "(no messages yet)")]
     lines = []
     for role, text in msgs:
-        label = "You:    " if role == "user" else "Claude: "
-        wrapped = textwrap.wrap(text, width=max(20, width - len(label)),
+        wrapped = textwrap.wrap(text, width=max(20, width),
                                 max_lines=3, placeholder=" …")
         for i, w in enumerate(wrapped):
-            lines.append((label if i == 0 else " " * len(label)) + w)
+            lines.append((role, i == 0, w))
     return lines[-height:]
 
 
@@ -728,41 +803,71 @@ def draw(sessions, sel, top, status, query="", prompt=None):
     ph = min(12, rows // 3) if show_preview else 0
     visible = max(1, rows - 4 - (ph + 1 if show_preview else 0))
     out = ["\x1b[H\x1b[2J"]
+
     running = sum(1 for s in sessions if s["running"])
-    filt = f"  filter: '{query}' (Esc clears)" if query else ""
-    out.append(f"{REV} claude-sessions {RESET}  {len(sessions)} sessions, "
-               f"{running} running{filt}\r\n")
-    hdr = f"  {'SESSION':8}  {'LAST':>9}  {'COST':>7}  {'STATE':7}  {'PROJECT':28.28}  TITLE"
-    out.append(DIM + hdr[:cols] + RESET + "\r\n")
+    total_cost = sum(s.get("cost_usd", 0) or 0 for s in sessions)
+    head = (f"{REV}{BOLD} ◆ claude-sessions {RESET}  "
+            f"{BOLD}{len(sessions)}{RESET}{DIM} sessions{RESET}   "
+            f"{GREEN}●{RESET} {BOLD}{running}{RESET}{DIM} running{RESET}   "
+            f"{YELLOW}~${total_cost:,.0f}{RESET}{DIM} lifetime{RESET}")
+    if query:
+        head += f"   {MAGENTA}⌕ {query}{RESET}{DIM}  Esc clears{RESET}"
+    out.append(head + "\r\n")
+
+    # fixed columns take 61 chars; the title gets the rest
+    title_w = max(10, cols - 62)
+    hdr = (f"   {'SESSION':<8}  {'LAST':>9}  {'COST':>7}  "
+           f"{'PROJECT':<26.26}  TITLE")
+    out.append(DIM + hdr[:cols - 1] + RESET + "\r\n")
+
     for i in range(top, min(top + visible, len(sessions))):
         s = sessions[i]
-        state = "RUNNING" if s["running"] else ""
-        line = (f"  {s['session_id'][:8]:8}  {humanize_time(s['last_activity']):>9}  "
-                f"{humanize_cost(s.get('cost_usd', 0)):>7}  {state:7}  "
-                f"{shorten_project(s['project']):28.28}  {display_title(s)}")
-        line = line[:cols - 1]
+        busy = s["running"] and (s.get("live") or {}).get("status") == "busy"
+        mark = "●" if s["running"] else "·"
+        sid = f"{s['session_id'][:8]:<8}"
+        when = f"{humanize_time(s['last_activity']):>9}"
+        cost = f"{humanize_cost(s.get('cost_usd', 0)):>7}"
+        proj = f"{shorten_project(s['project']):<26.26}"
+        title = display_title(s)[:title_w]
         if i == sel:
-            out.append(REV + line + RESET + "\r\n")
-        elif s["running"]:
-            out.append(GREEN + line + RESET + "\r\n")
+            line = f" {mark} {sid}  {when}  {cost}  {proj}  {title}"
+            out.append(REV + BOLD + line[:cols - 1] + RESET + "\r\n")
         else:
-            out.append(line + "\r\n")
+            mcol = (YELLOW if busy else GREEN) if s["running"] else DIM
+            tcol = BOLD if s["running"] else ""
+            out.append(f" {mcol}{mark}{RESET} {DIM}{sid}{RESET}  {DIM}{when}{RESET}  "
+                       f"{YELLOW}{cost}{RESET}  {CYAN}{proj}{RESET}  "
+                       f"{tcol}{title}{RESET}\r\n")
     if not sessions:
-        out.append("  (no sessions)\r\n")
+        out.append(f"\r\n   {DIM}Nothing here yet.{RESET}\r\n"
+                   f"   Press {BOLD}{CYAN}n{RESET} to start your first "
+                   f"Claude session ✨\r\n")
+
     if show_preview and 0 <= sel < len(sessions):
         out.append(f"\x1b[{rows - ph - 1};1H")
-        title = f"─── {display_title(sessions[sel])[:cols - 10]} "
-        out.append(DIM + title + "─" * max(0, cols - len(title) - 1) + RESET + "\r\n")
-        for pline in preview_lines(sessions[sel], cols - 2, ph):
-            styled = DIM + pline[:cols - 2] + RESET if pline.startswith(("You", " ")) \
-                else pline[:cols - 2]
-            out.append(" " + styled + "\r\n")
+        cap = f" {display_title(sessions[sel])[:cols - 12]} "
+        bar = "───" + cap + "─" * max(0, cols - 5 - len(cap))
+        out.append(DIM + CYAN + bar[:cols - 1] + RESET + "\r\n")
+        for role, first, text in preview_lines(sessions[sel], cols - 12, ph):
+            if first and role == "user":
+                lab = f"{BOLD}{BLUE}   You{RESET} {DIM}▏{RESET}"
+            elif first and role == "assistant":
+                lab = f"{BOLD}{MAGENTA}Claude{RESET} {DIM}▏{RESET}"
+            else:
+                lab = f"       {DIM}▏{RESET}"
+            body = (DIM + text + RESET) if role == "user" else text
+            out.append(" " + lab + " " + body + "\r\n")
+
     out.append(f"\x1b[{rows};1H")
     if prompt:
-        out.append(REV + prompt[:cols - 1] + RESET)
+        out.append(RED + REV + BOLD + prompt[:cols - 1] + RESET)
+    elif status:
+        out.append(" " + status + RESET)
     else:
-        footer = status or "Enter resume · / search · n new · d delete · j/k move · q quit"
-        out.append(DIM + footer[:cols - 1] + RESET)
+        keys = "   ".join(f"{BOLD}{CYAN}{k}{RESET}{DIM} {v}{RESET}" for k, v in [
+            ("⏎", "resume"), ("/", "search"), ("n", "new"),
+            ("d", "delete"), ("j/k", "move"), ("q", "quit")])
+        out.append(" " + keys)
     sys.stdout.write("".join(out))
     sys.stdout.flush()
 
@@ -827,7 +932,10 @@ def interactive():
                 if q:
                     query = q
                     view = search_sessions(all_sessions, q)
-                    status = f"{len(view)} sessions match '{q}'"
+                    status = (f"{MAGENTA}⌕{RESET} {BOLD}{len(view)}{RESET} "
+                              f"sessions match '{q}'" if view else
+                              f"{MAGENTA}⌕{RESET} no matches for '{q}' — "
+                              f"{DIM}Esc to clear{RESET}")
                 else:
                     query, view = "", all_sessions
                 sel, top = 0, 0
@@ -844,12 +952,14 @@ def interactive():
                 draw(view, sel, top, "", query,
                      prompt=f" Delete {s['session_id'][:8]} ({display_title(s)[:40]})? y/N ")
                 if get_key(fd) == "y":
-                    ok, status = delete_session(s)
+                    ok, msg = delete_session(s)
+                    status = (f"{GREEN}✓{RESET} {msg}" if ok
+                              else f"{RED}✗{RESET} {msg}")
                     if ok:
                         all_sessions = collect_sessions()
                         view = search_sessions(all_sessions, query) if query else all_sessions
                 else:
-                    status = "Cancelled."
+                    status = f"{DIM}Cancelled — nothing deleted.{RESET}"
             elif key == "n":
                 default = (view[sel]["project"] if view else None) or os.getcwd()
                 raw_off()
@@ -875,11 +985,25 @@ def interactive():
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="claude-sessions",
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+
+    # friendly help + typo suggestions, before argparse gets a chance to shout
+    if any(a in ("-h", "--help") for a in argv) or (argv and argv[0] == "help"):
+        print_help()
+        return 0
+    first = next((a for a in argv if not a.startswith("-")), None)
+    valid = [c for c in COMMANDS if c != "help"]
+    if first is not None and argv.index(first) == 0 and first not in valid:
+        import difflib
+        guess = difflib.get_close_matches(first, list(COMMANDS), n=1)
+        hint = f" — did you mean {BOLD}cs {guess[0]}{RESET}?" if guess else ""
+        print(f"{RED}✗{RESET} Unknown command '{first}'{hint}   "
+              f"{DIM}(cs help shows everything){RESET}", file=sys.stderr)
+        return 2
+
+    p = argparse.ArgumentParser(prog="claude-sessions", add_help=False,
                                 description=__doc__.splitlines()[0])
-    p.add_argument("command", nargs="?", default=None,
-                   choices=["list", "show", "interactive", "resume", "delete",
-                            "new", "search", "watch", "prune", "export", "stats"],
+    p.add_argument("command", nargs="?", default=None, choices=valid,
                    help="default: interactive on a TTY, else list")
     p.add_argument("arg", nargs="?",
                    help="session id prefix (show/resume/delete/export), "
