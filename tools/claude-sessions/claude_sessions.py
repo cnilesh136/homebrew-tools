@@ -346,29 +346,11 @@ def humanize_duration(secs):
     return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
-def _terminal_notifier():
-    # launchd services get a minimal PATH, so check brew locations explicitly
-    for p in (shutil.which("terminal-notifier"),
-              "/opt/homebrew/bin/terminal-notifier",
-              "/usr/local/bin/terminal-notifier"):
-        if p and os.path.exists(p):
-            return p
-    return None
-
-
 def notify_mac(title, message, subtitle=""):
+    # osascript is the one channel modern macOS reliably allows for CLI tools:
+    # third-party notifiers (terminal-notifier & co.) are refused notification
+    # permission outright on macOS 15+, and sender spoofing is silently dropped.
     if sys.platform != "darwin":
-        return
-    tn = _terminal_notifier()
-    if tn:
-        # Rich notification: Claude's own app icon, grouped so new ones
-        # replace old, clicking brings the Claude app forward.
-        subprocess.run(
-            [tn, "-title", title, "-subtitle", subtitle, "-message", message,
-             "-sound", "Glass", "-group", "claude-sessions",
-             "-sender", "com.anthropic.claudefordesktop",
-             "-activate", "com.anthropic.claudefordesktop"],
-            capture_output=True)
         return
     def esc(t):
         return (t or "").replace("\\", "\\\\").replace('"', '\\"')
@@ -408,8 +390,9 @@ def watch(interval=3.0, quiet=False):
                                f"Turn took {humanize_duration(took)} — "
                                f"ready for you",
                                subtitle=shorten_project(info.get("cwd")))
-            elif new_st not in ("busy", "idle", None):
-                # any other state (permission prompt, question, plan approval…)
+            elif new_st not in ("busy", "idle", "shell", None):
+                # any other state (permission prompt, question, plan approval…);
+                # "shell" is the user themselves at the keyboard — don't ping
                 log(f"waiting for input: {label} ({new_st})")
                 if not quiet:
                     notify_mac(f"⌨️ {label} needs you",

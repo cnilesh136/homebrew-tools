@@ -77,11 +77,14 @@ session. Deleting a running session is refused until you quit it.
 
 ## Notifications
 
-`cs watch` (or the background service) sends a rich macOS notification —
-Claude's app icon, the session name, project as subtitle — when a running
-session **finishes its turn** (with the turn duration) or **changes state to
-waiting for your input**. Uses `terminal-notifier` (installed automatically
-as a brew dependency); falls back to plain osascript without it.
+`cs watch` (or the background service) sends a macOS notification — session
+name, project as subtitle — when a running session **finishes its turn**
+(with the turn duration) or **changes state to waiting for your input**.
+
+Delivery uses osascript: it is the one channel modern macOS reliably allows
+for CLI tools (third-party notifiers like terminal-notifier are refused
+notification permission on macOS 15+, and sender-icon spoofing is silently
+dropped), so the notification carries the Script Editor icon by design.
 
 Control the always-on service:
 
