@@ -4,7 +4,7 @@ class ClaudeSessions < Formula
   desc "List, resume, delete, and start Claude Code sessions from one picker"
   homepage "https://github.com/cnilesh136/homebrew-tools"
   url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACED_BY_PUBLISH_SCRIPT"
+  sha256 "be722fb1fe721602e8e7093facd711cfe5cd3f2b01537288226504c6c27cbdd4"
   license "MIT"
 
   depends_on "python@3.13"
