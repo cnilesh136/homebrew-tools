@@ -77,10 +77,19 @@ session. Deleting a running session is refused until you quit it.
 
 ## Notifications
 
-`cs watch` (or the brew service) sends a rich macOS notification when a
-running session finishes its turn — Claude's app icon, the session name,
-and how long the turn took (via `terminal-notifier`, installed automatically
-as a brew dependency; falls back to plain osascript without it).
+`cs watch` (or the background service) sends a rich macOS notification —
+Claude's app icon, the session name, project as subtitle — when a running
+session **finishes its turn** (with the turn duration) or **changes state to
+waiting for your input**. Uses `terminal-notifier` (installed automatically
+as a brew dependency); falls back to plain osascript without it.
+
+Control the always-on service:
+
+```bash
+cs service start     # enable (survives reboots)
+cs service stop      # disable anytime
+cs service status    # check
+```
 
 ## Notes
 

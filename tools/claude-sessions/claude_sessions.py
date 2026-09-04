@@ -346,10 +346,20 @@ def humanize_duration(secs):
     return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
+def _terminal_notifier():
+    # launchd services get a minimal PATH, so check brew locations explicitly
+    for p in (shutil.which("terminal-notifier"),
+              "/opt/homebrew/bin/terminal-notifier",
+              "/usr/local/bin/terminal-notifier"):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
 def notify_mac(title, message, subtitle=""):
     if sys.platform != "darwin":
         return
-    tn = shutil.which("terminal-notifier")
+    tn = _terminal_notifier()
     if tn:
         # Rich notification: Claude's own app icon, grouped so new ones
         # replace old, clicking brings the Claude app forward.
@@ -381,11 +391,16 @@ def watch(interval=3.0, quiet=False):
         for sid, info in live.items():
             old = prev.get(sid)
             label = info.get("name") or shorten_project(info.get("cwd")) or sid[:8]
-            if info.get("status") == "busy":
+            new_st = info.get("status")
+            old_st = old.get("status") if old else None
+            if new_st == "busy":
                 busy_since.setdefault(sid, time.time())
             if old is None:
-                log(f"session started: {label} ({info.get('status')})")
-            elif old.get("status") == "busy" and info.get("status") == "idle":
+                log(f"session started: {label} ({new_st})")
+                continue
+            if old_st == new_st:
+                continue
+            if old_st == "busy" and new_st == "idle":
                 took = time.time() - busy_since.pop(sid, time.time())
                 log(f"finished: {label} (turn took {humanize_duration(took)})")
                 if not quiet:
@@ -393,12 +408,42 @@ def watch(interval=3.0, quiet=False):
                                f"Turn took {humanize_duration(took)} — "
                                f"ready for you",
                                subtitle=shorten_project(info.get("cwd")))
+            elif new_st not in ("busy", "idle", None):
+                # any other state (permission prompt, question, plan approval…)
+                log(f"waiting for input: {label} ({new_st})")
+                if not quiet:
+                    notify_mac(f"⌨️ {label} needs you",
+                               "Claude is waiting for your input",
+                               subtitle=shorten_project(info.get("cwd")))
         for sid, old in prev.items():
             if sid not in live:
                 busy_since.pop(sid, None)
                 label = old.get("name") or shorten_project(old.get("cwd")) or sid[:8]
                 log(f"session ended: {label}")
         prev = live
+
+
+def service_cmd(action):
+    """Control the background notification watcher (brew service)."""
+    action = action or "status"
+    if action not in ("start", "stop", "restart", "status"):
+        print(f"Unknown service action '{action}' — "
+              f"use start, stop, restart, or status", file=sys.stderr)
+        return 2
+    brew = shutil.which("brew") or next(
+        (p for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+         if os.path.exists(p)), None)
+    if not brew:
+        print("Homebrew not found — the watcher service is managed by "
+              "`brew services`.", file=sys.stderr)
+        return 1
+    verb = "info" if action == "status" else action
+    rc = subprocess.run([brew, "services", verb, "claude-sessions"]).returncode
+    if rc == 0 and action == "stop":
+        print("Notifications off. Re-enable anytime: cs service start")
+    if rc == 0 and action in ("start", "restart"):
+        print("You'll get a desktop ping when a session finishes or needs input.")
+    return rc
 
 
 # ---------------------------------------------------------------- actions
@@ -692,7 +737,8 @@ COMMANDS = {
     "resume":      "jump back into a session, right in its project dir",
     "new":         "start a fresh Claude session in any directory",
     "delete":      "remove a session transcript (asks first)",
-    "watch":       "get notified the moment a running session finishes",
+    "watch":       "get notified when a session finishes or needs input",
+    "service":     "notifications always-on: cs service start|stop|status",
     "prune":       "sweep away empty or stale sessions",
     "export":      "turn a conversation into shareable Markdown",
     "stats":       "tokens + cost breakdown by project and model",
@@ -736,8 +782,8 @@ def print_help():
         ("cs", "browse & resume — green dot = running"),
         ('cs search "that bug"', "find any conversation, ever"),
         ("cs stats", "see what your sessions really cost"),
-        ("brew services start claude-sessions",
-         "desktop ping when Claude finishes a turn"),
+        ("cs service start",
+         "desktop ping when Claude finishes or needs you"),
     ]:
         print(f"    {c(f'{ex:<38}', GREEN)}{c(desc, DIM)}")
     print()
@@ -963,6 +1009,16 @@ def interactive():
     sel, top, status = 0, 0, ""
     tick = 0
     spark = activity_spark()
+    flag = Path.home() / ".config" / "claude-sessions" / "welcomed"
+    if not flag.exists():
+        try:
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.touch()
+        except OSError:
+            pass
+        status = (f"👋 {BOLD}Welcome!{RESET} {BOLD}{CYAN}⏎{RESET} resumes a session"
+                  f" · {BOLD}{CYAN}/{RESET} searches everything you ever discussed"
+                  f" · {CYAN}cs help{RESET}{DIM} shows the full tour{RESET}")
     raw_on()
     try:
         while True:
@@ -1118,6 +1174,8 @@ def main(argv=None):
 
     if cmd == "interactive":
         return interactive()
+    if cmd == "service":
+        return service_cmd(args.arg)
     if cmd == "watch":
         try:
             return watch(interval=max(1.0, args.interval), quiet=args.quiet)
