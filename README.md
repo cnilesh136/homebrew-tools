@@ -16,18 +16,26 @@ Stdlib-only Python 3.9+, no dependencies. macOS/Linux.
   still alive.
 - Honors `CLAUDE_CONFIG_DIR` if set.
 
+## Install
+
+```bash
+brew install cnilesh136/tools/claude-sessions
+```
+
+Installs two global commands: `claude-sessions` and the short alias `cs`.
+
 ## Usage
 
 ```bash
-./claude_sessions.py                     # interactive picker (when on a TTY)
-./claude_sessions.py list                # table, running first then newest
-./claude_sessions.py list --json         # full JSON for scripting
-./claude_sessions.py list --running      # only live sessions
-./claude_sessions.py list --project omnivox  # filter by project path substring
-./claude_sessions.py show 167d0a93       # full detail for one session (id prefix ok)
-./claude_sessions.py resume 167d0a93     # cd to the project and exec `claude --resume`
-./claude_sessions.py delete 167d0a93     # delete transcript (asks; --yes to skip)
-./claude_sessions.py new ~/some/project  # start a new session there (default: cwd)
+cs                          # interactive picker (when on a TTY)
+cs list                     # table, running first then newest
+cs list --json              # full JSON for scripting
+cs list --running           # only live sessions
+cs list --project omnivox   # filter by project path substring
+cs show 167d0a93            # full detail for one session (id prefix ok)
+cs resume 167d0a93          # cd to the project and exec `claude --resume`
+cs delete 167d0a93          # delete transcript (asks; --yes to skip)
+cs new ~/some/project       # start a new session there (default: cwd)
 ```
 
 Piped/non-TTY invocations default to `list`, so scripts keep working.
@@ -49,12 +57,6 @@ session is refused until you quit it.
 
 Table columns: session id (short), project, title (custom title or first prompt),
 last activity, message count, output tokens, model(s), running state.
-
-Handy alias:
-
-```bash
-alias claude-sessions='python3 ~/Documents/VP/tools/claude-sessions/claude_sessions.py'
-```
 
 ## Notes
 
