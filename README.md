@@ -1,68 +1,45 @@
-# claude-sessions
+# homebrew-tools
 
-CLI to list, resume, delete, and start Claude Code sessions on this machine —
-past transcripts and currently running processes — with per-session usage stats.
-
-Stdlib-only Python 3.9+, no dependencies. macOS/Linux.
-
-## Data sources
-
-- `~/.claude/projects/<encoded-project-path>/<session-id>.jsonl` — one transcript
-  per session. Records carry `cwd`, `timestamp`, `gitBranch`, `version`; assistant
-  records carry `message.model` and `message.usage` token counts; `custom-title`
-  records carry the session name shown in the UI.
-- `~/.claude/sessions/<pid>.json` — metadata for live CLI processes (sessionId,
-  pid, name, busy/idle status). A session is reported RUNNING only if its pid is
-  still alive.
-- Honors `CLAUDE_CONFIG_DIR` if set.
-
-## Install
+Personal Homebrew tap — small macOS CLI tools, installable on any Mac with:
 
 ```bash
-brew install cnilesh136/tools/claude-sessions
+brew install cnilesh136/tools/<tool>
 ```
 
-Installs two global commands: `claude-sessions` and the short alias `cs`.
+## Tools
 
-## Usage
+| Tool | Commands | Description |
+|------|----------|-------------|
+| [claude-sessions](tools/claude-sessions/) | `claude-sessions`, `cs` | List, search, resume, watch, and manage Claude Code sessions — interactive picker, full-text search, cost stats, finished-turn notifications (`brew services start claude-sessions`) |
+
+Each tool's own README (in `tools/<tool>/`) documents its usage in full.
+
+## Repo structure
+
+```
+Formula/<tool>.rb        one Homebrew formula per tool
+tools/<tool>/            the tool's source + its README
+scripts/publish.sh       release helper (tags, sha256, formula update)
+```
+
+Tools version independently via per-tool git tags: `<tool>-v<version>`
+(e.g. `claude-sessions-v0.2.0`). Each formula's `url` points at its own tag
+tarball.
+
+## Adding a new tool
+
+1. Put the source in `tools/<name>/` with a `README.md`.
+2. Write `Formula/<name>.rb` (copy `claude-sessions.rb` as a template — install
+   from `tools/<name>/...`, keep the `test do` block meaningful).
+3. Add a row to the Tools table above.
+4. Release: `./scripts/publish.sh <name> 0.1.0`
+
+## Releasing an update
 
 ```bash
-cs                          # interactive picker (when on a TTY)
-cs list                     # table, running first then newest
-cs list --json              # full JSON for scripting
-cs list --running           # only live sessions
-cs list --project omnivox   # filter by project path substring
-cs show 167d0a93            # full detail for one session (id prefix ok)
-cs resume 167d0a93          # cd to the project and exec `claude --resume`
-cs delete 167d0a93          # delete transcript (asks; --yes to skip)
-cs new ~/some/project       # start a new session there (default: cwd)
+./scripts/publish.sh <tool> <new-version>
 ```
 
-Piped/non-TTY invocations default to `list`, so scripts keep working.
-
-## Interactive mode
-
-Full-screen picker (alternate screen, restores your terminal on exit):
-
-| Key            | Action                                          |
-|----------------|-------------------------------------------------|
-| ↑/↓ or j/k     | move selection (g/G = top/bottom)               |
-| Enter or r     | resume selected session in its project dir      |
-| n              | start a new session (prompts for directory)     |
-| d              | delete selected session's transcript (confirms) |
-| q or Esc       | quit                                            |
-
-Running sessions are shown in green and sorted to the top; deleting a running
-session is refused until you quit it.
-
-Table columns: session id (short), project, title (custom title or first prompt),
-last activity, message count, output tokens, model(s), running state.
-
-## Notes
-
-- Token figures are summed from transcript usage records: `input`/`output` plus
-  `cache_read`/`cache_creation` (visible in `--json` and `show`). The table shows
-  output tokens as the best single proxy for work done.
-- Sidechain (subagent) messages are excluded from message/model counts.
-- A live session with no transcript yet (nothing written) still appears, marked
-  RUNNING with no history.
+The script pushes main, force-tags `<tool>-v<version>`, downloads the GitHub
+tag tarball to compute its sha256, patches the formula, and pushes again.
+Users get it with `brew update && brew upgrade <tool>`.
