@@ -4,7 +4,7 @@ class ClaudeSessions < Formula
   desc "List, search, resume, watch, and manage Claude Code sessions"
   homepage "https://github.com/cnilesh136/homebrew-tools"
   url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/claude-sessions-v0.5.0.tar.gz"
-  sha256 "5e6caadaaf2ca5412b716e20f9f18d225f44d5f73ecaae2c59f332b4da5b8959"
+  sha256 "6d10bc2591e1efc36be51469de7e6e6bdb8172d5d607a3f96d106e566077a5a2"
   license "MIT"
 
   depends_on "python@3.13"
