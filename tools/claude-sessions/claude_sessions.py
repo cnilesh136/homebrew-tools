@@ -346,16 +346,16 @@ def humanize_duration(secs):
     return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
 
 
-def notify_mac(title, message, subtitle=""):
+def notify_mac(title, message, subtitle="", sound="Glass"):
     # osascript is the one channel modern macOS reliably allows for CLI tools:
-    # third-party notifiers (terminal-notifier & co.) are refused notification
-    # permission outright on macOS 15+, and sender spoofing is silently dropped.
+    # third-party notifiers, sender spoofing, and even AppleScript applets are
+    # refused notification permission on macOS 15+ (verified empirically).
     if sys.platform != "darwin":
         return
     def esc(t):
         return (t or "").replace("\\", "\\\\").replace('"', '\\"')
     script = (f'display notification "{esc(message)}" with title "{esc(title)}" '
-              f'subtitle "{esc(subtitle)}" sound name "Glass"')
+              f'subtitle "{esc(subtitle)}" sound name "{esc(sound)}"')
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
@@ -386,18 +386,24 @@ def watch(interval=3.0, quiet=False):
                 took = time.time() - busy_since.pop(sid, time.time())
                 log(f"finished: {label} (turn took {humanize_duration(took)})")
                 if not quiet:
-                    notify_mac(f"✅ {label} finished",
-                               f"Turn took {humanize_duration(took)} — "
-                               f"ready for you",
-                               subtitle=shorten_project(info.get("cwd")))
+                    emoji = "⚡" if took < 10 else ("✅" if took < 300 else "🏁")
+                    others = sum(1 for o_sid, o in live.items()
+                                 if o_sid != sid and o.get("status") == "busy")
+                    tail = (f" · {others} still busy" if others
+                            else " — all quiet, ready for you")
+                    notify_mac(f"{emoji} {label} finished",
+                               f"Turn took {humanize_duration(took)}{tail}",
+                               subtitle=f"in {shorten_project(info.get('cwd'))}")
             elif new_st not in ("busy", "idle", "shell", None):
                 # any other state (permission prompt, question, plan approval…);
                 # "shell" is the user themselves at the keyboard — don't ping
                 log(f"waiting for input: {label} ({new_st})")
                 if not quiet:
                     notify_mac(f"⌨️ {label} needs you",
-                               "Claude is waiting for your input",
-                               subtitle=shorten_project(info.get("cwd")))
+                               "Claude is waiting on a prompt — "
+                               "it can't continue until you answer",
+                               subtitle=f"in {shorten_project(info.get('cwd'))}",
+                               sound="Ping")
         for sid, old in prev.items():
             if sid not in live:
                 busy_since.pop(sid, None)
