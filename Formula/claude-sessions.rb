@@ -3,11 +3,12 @@ class ClaudeSessions < Formula
 
   desc "List, search, resume, watch, and manage Claude Code sessions"
   homepage "https://github.com/cnilesh136/homebrew-tools"
-  url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/claude-sessions-v0.3.0.tar.gz"
+  url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/claude-sessions-v0.4.0.tar.gz"
   sha256 "cfc5389b7b05d2b590f47f4a467a33bf38419f8075b7b71f4c27d13ab6001c41"
   license "MIT"
 
   depends_on "python@3.13"
+  depends_on "terminal-notifier" if OS.mac?
 
   def install
     cd "tools/claude-sessions" do
