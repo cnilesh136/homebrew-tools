@@ -23,15 +23,26 @@ pings you the moment the answer changes.
 Unlike Claude Code's built-in `/resume`, `cs` sees **all projects** — and
 unlike anything else, it knows what's running *right now*.
 
-Stdlib-only Python 3.9+, no dependencies. macOS/Linux (notifications macOS).
+Stdlib-only Python 3.9+, no dependencies. **macOS and Ubuntu/Linux.**
 
 ## Install
+
+**macOS or Linux with [Homebrew](https://brew.sh):**
 
 ```bash
 brew install cnilesh136/tools/claude-sessions
 ```
 
-Installs two global commands: `claude-sessions` and the short alias `cs`.
+**Ubuntu/Linux without Homebrew** (needs python3, present by default):
+
+```bash
+mkdir -p ~/.local/bin && curl -fsSL \
+  https://raw.githubusercontent.com/cnilesh136/homebrew-tools/main/tools/claude-sessions/claude_sessions.py \
+  -o ~/.local/bin/claude-sessions && chmod +x ~/.local/bin/claude-sessions \
+  && ln -sf ~/.local/bin/claude-sessions ~/.local/bin/cs
+```
+
+Either way you get two global commands: `claude-sessions` and the short alias `cs`.
 
 To get a desktop notification whenever a running Claude session finishes its
 turn, enable the background watcher once (persists across reboots):
@@ -85,19 +96,22 @@ session. Deleting a running session is refused until you quit it.
 
 ## Notifications
 
-`cs watch` (or the background service) sends a macOS notification — session
+`cs watch` (or the background service) sends a desktop notification — session
 name, project as subtitle — when a running session **finishes its turn**
 (with the turn duration) or **changes state to waiting for your input**.
 
-Delivery uses osascript: it is the one channel modern macOS reliably allows
-for CLI tools (third-party notifiers like terminal-notifier are refused
-notification permission on macOS 15+, and sender-icon spoofing is silently
-dropped), so the notification carries the Script Editor icon by design.
+- **macOS:** delivered via osascript — the one channel modern macOS reliably
+  allows for CLI tools (third-party notifiers like terminal-notifier are
+  refused notification permission on macOS 15+, and sender-icon spoofing is
+  silently dropped), so the notification carries the Script Editor icon by
+  design. Finish = Glass sound, needs-input = Ping.
+- **Ubuntu/Linux:** delivered via `notify-send` (libnotify, preinstalled on
+  Ubuntu desktop), with freedesktop sounds via `paplay` when available.
 
-Control the always-on service:
+Control the always-on service (survives reboots on both platforms):
 
 ```bash
-cs service start     # enable (survives reboots)
+cs service start     # macOS: brew service · Linux: systemd user unit
 cs service stop      # disable anytime
 cs service status    # check
 ```

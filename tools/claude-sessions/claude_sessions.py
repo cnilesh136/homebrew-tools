@@ -26,7 +26,8 @@ Interactive keys:
   d               delete      g/G      top/bottom
   q               quit        Esc      clear search, then quit
 
-Stdlib only; Python 3.9+; macOS/Linux (notifications are macOS).
+Stdlib only; Python 3.9+; macOS and Linux (notifications: osascript on macOS,
+notify-send on Linux; always-on service: brew services / systemd user unit).
 """
 
 import argparse
@@ -350,13 +351,39 @@ def notify_mac(title, message, subtitle="", sound="Glass"):
     # osascript is the one channel modern macOS reliably allows for CLI tools:
     # third-party notifiers, sender spoofing, and even AppleScript applets are
     # refused notification permission on macOS 15+ (verified empirically).
-    if sys.platform != "darwin":
-        return
     def esc(t):
         return (t or "").replace("\\", "\\\\").replace('"', '\\"')
     script = (f'display notification "{esc(message)}" with title "{esc(title)}" '
               f'subtitle "{esc(subtitle)}" sound name "{esc(sound)}"')
     subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+LINUX_SOUNDS = {  # freedesktop sound theme equivalents of the macOS names
+    "Glass": "/usr/share/sounds/freedesktop/stereo/complete.oga",
+    "Ping": "/usr/share/sounds/freedesktop/stereo/bell.oga",
+}
+
+
+def notify_linux(title, message, subtitle="", sound="Glass"):
+    ns = shutil.which("notify-send")
+    if not ns:
+        return
+    body = (subtitle + "\n" if subtitle else "") + message
+    icon = "dialog-question" if sound == "Ping" else "dialog-information"
+    subprocess.run([ns, "-a", "claude-sessions", "-i", icon, title, body],
+                   capture_output=True)
+    wav = LINUX_SOUNDS.get(sound)
+    player = shutil.which("paplay")
+    if wav and player and os.path.exists(wav):
+        subprocess.Popen([player, wav], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+
+
+def notify(title, message, subtitle="", sound="Glass"):
+    if sys.platform == "darwin":
+        notify_mac(title, message, subtitle, sound)
+    elif sys.platform.startswith("linux"):
+        notify_linux(title, message, subtitle, sound)
 
 
 def watch(interval=3.0, quiet=False):
@@ -391,7 +418,7 @@ def watch(interval=3.0, quiet=False):
                                  if o_sid != sid and o.get("status") == "busy")
                     tail = (f" · {others} still busy" if others
                             else " — all quiet, ready for you")
-                    notify_mac(f"{emoji} {label} finished",
+                    notify(f"{emoji} {label} finished",
                                f"Turn took {humanize_duration(took)}{tail}",
                                subtitle=f"in {shorten_project(info.get('cwd'))}")
             elif new_st not in ("busy", "idle", "shell", None):
@@ -399,7 +426,7 @@ def watch(interval=3.0, quiet=False):
                 # "shell" is the user themselves at the keyboard — don't ping
                 log(f"waiting for input: {label} ({new_st})")
                 if not quiet:
-                    notify_mac(f"⌨️ {label} needs you",
+                    notify(f"⌨️ {label} needs you",
                                "Claude is waiting on a prompt — "
                                "it can't continue until you answer",
                                subtitle=f"in {shorten_project(info.get('cwd'))}",
@@ -412,22 +439,60 @@ def watch(interval=3.0, quiet=False):
         prev = live
 
 
+SYSTEMD_UNIT = "claude-sessions-watch.service"
+
+
+def _systemd_service(action):
+    """Linux: manage the watcher as a systemd user unit (any install method)."""
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("systemd not found — run `cs watch` in a terminal or your own "
+              "supervisor instead.", file=sys.stderr)
+        return 1
+    unit_path = Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
+    if action in ("start", "restart"):
+        exe = shutil.which("claude-sessions") or os.path.abspath(sys.argv[0])
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(f"""[Unit]
+Description=claude-sessions watch — Claude Code session notifications
+
+[Service]
+ExecStart={exe} watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+""")
+        subprocess.run([systemctl, "--user", "daemon-reload"])
+    verbs = {"start": ["enable", "--now"], "restart": ["restart"],
+             "stop": ["disable", "--now"], "status": ["status", "--no-pager"]}
+    rc = subprocess.run([systemctl, "--user", *verbs[action], SYSTEMD_UNIT]).returncode
+    if action == "stop" and unit_path.exists():
+        unit_path.unlink()
+        subprocess.run([systemctl, "--user", "daemon-reload"])
+    return rc
+
+
 def service_cmd(action):
-    """Control the background notification watcher (brew service)."""
+    """Control the background notification watcher (brew service / systemd)."""
     action = action or "status"
     if action not in ("start", "stop", "restart", "status"):
         print(f"Unknown service action '{action}' — "
               f"use start, stop, restart, or status", file=sys.stderr)
         return 2
-    brew = shutil.which("brew") or next(
-        (p for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
-         if os.path.exists(p)), None)
-    if not brew:
-        print("Homebrew not found — the watcher service is managed by "
-              "`brew services`.", file=sys.stderr)
-        return 1
-    verb = "info" if action == "status" else action
-    rc = subprocess.run([brew, "services", verb, "claude-sessions"]).returncode
+    if sys.platform.startswith("linux"):
+        rc = _systemd_service(action)
+    else:
+        brew = shutil.which("brew") or next(
+            (p for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+             if os.path.exists(p)), None)
+        if not brew:
+            print("Homebrew not found — the watcher service is managed by "
+                  "`brew services`.", file=sys.stderr)
+            return 1
+        verb = "info" if action == "status" else action
+        rc = subprocess.run([brew, "services", verb, "claude-sessions"]).returncode
     if rc == 0 and action == "stop":
         print("Notifications off. Re-enable anytime: cs service start")
     if rc == 0 and action in ("start", "restart"):

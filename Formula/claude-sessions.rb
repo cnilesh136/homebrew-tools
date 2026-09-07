@@ -3,7 +3,7 @@ class ClaudeSessions < Formula
 
   desc "List, search, resume, watch, and manage Claude Code sessions"
   homepage "https://github.com/cnilesh136/homebrew-tools"
-  url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/claude-sessions-v0.5.2.tar.gz"
+  url "https://github.com/cnilesh136/homebrew-tools/archive/refs/tags/claude-sessions-v0.6.0.tar.gz"
   sha256 "92757ab652d1b5c2c70975688efc8b0d5a921a08c60417323dac17118d2fefef"
   license "MIT"
 
