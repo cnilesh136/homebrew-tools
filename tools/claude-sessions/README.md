@@ -2,6 +2,8 @@
 
 > **Mission control for your Claude Code sessions.**
 
+![claude-sessions live picker: running sessions with animated status, cost, sparkline, preview pane, and full-text search](demo.gif)
+
 You're running three Claude sessions in three terminals. Which one is still
 working? Which one finished while you were in a meeting? Which one is sitting
 at a permission prompt, blocked on you? `cs` answers that at a glance — and

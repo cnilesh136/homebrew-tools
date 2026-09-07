@@ -14,6 +14,8 @@ brew install cnilesh136/tools/<tool>
 
 Each tool's own README (in `tools/<tool>/`) documents its usage in full.
 
+![claude-sessions live picker](tools/claude-sessions/demo.gif)
+
 ## Repo structure
 
 ```
