@@ -10,7 +10,7 @@ brew install cnilesh136/tools/<tool>
 
 | Tool | Commands | Description |
 |------|----------|-------------|
-| [claude-sessions](tools/claude-sessions/) | `claude-sessions`, `cs` | List, search, resume, watch, and manage Claude Code sessions — interactive picker, full-text search, cost stats, finished-turn notifications (`brew services start claude-sessions`) |
+| [claude-sessions](tools/claude-sessions/) | `claude-sessions`, `cs` | Mission control for Claude Code sessions — live picker with running/busy status across all projects, finished-turn & needs-input notifications, full-text search of every conversation, cost stats, export |
 
 Each tool's own README (in `tools/<tool>/`) documents its usage in full.
 
