@@ -4,6 +4,8 @@
 Scans ~/.claude/projects/*/<session-id>.jsonl transcripts, enriches them with
 live-process info from ~/.claude/sessions/<pid>.json.
 
+Cross-platform: Windows (msvcrt), macOS (termios/osascript), Linux (termios/notify-send).
+
 Usage (installed as `claude-sessions`, short alias `cs`):
   cs                          # interactive picker (when on a TTY)
   cs list                     # table of all sessions, newest first
@@ -12,9 +14,9 @@ Usage (installed as `claude-sessions`, short alias `cs`):
   cs list --project X         # filter by project path substring
   cs search <query>           # full-text search across all transcripts
   cs show <id-prefix>         # full detail for one session (JSON)
-  cs resume <id-prefix>       # resume a session (execs `claude --resume`)
+  cs resume <id-prefix>       # resume a session (runs `claude --resume`)
   cs delete <id-prefix>       # delete a session transcript (--yes to skip confirm)
-  cs new [directory]          # start a new session (execs `claude`)
+  cs new [directory]          # start a new session (runs `claude`)
   cs watch                    # notify when a running session finishes its turn
   cs prune                    # delete empty sessions (--older-than N for stale ones)
   cs export <id-prefix>       # render a transcript to Markdown
@@ -26,24 +28,32 @@ Interactive keys:
   d               delete      g/G      top/bottom
   q               quit        Esc      clear search, then quit
 
-Stdlib only; Python 3.9+; macOS and Linux (notifications: osascript on macOS,
-notify-send on Linux; always-on service: brew services / systemd user unit).
+Stdlib only; Python 3.9+.
 """
 
 import argparse
 import json
 import os
-import select
 import shutil
 import signal
 import subprocess
 import sys
-import termios
 import textwrap
 import time
-import tty
 from datetime import datetime, timezone
 from pathlib import Path
+
+IS_WINDOWS = os.name == "nt"
+
+if IS_WINDOWS:
+    import msvcrt
+    termios = tty = None
+    select = None
+else:
+    import select
+    import termios
+    import tty
+    msvcrt = None
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
 PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -94,6 +104,23 @@ def session_cost(model_usage):
 # ---------------------------------------------------------------- live sessions
 
 def pid_alive(pid):
+    if IS_WINDOWS:
+        # os.kill(pid, 0) raises on Windows for foreign processes; use tasklist-free
+        # OpenProcess via ctypes to avoid spawning a subprocess per session.
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -110,7 +137,7 @@ def load_live_sessions():
         return live
     for f in LIVE_DIR.glob("*.json"):
         try:
-            meta = json.loads(f.read_text())
+            meta = json.loads(f.read_text(encoding="utf-8", errors="replace"))
         except (json.JSONDecodeError, OSError):
             continue
         pid = meta.get("pid")
@@ -168,6 +195,8 @@ def parse_transcript(path):
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(r, dict):
                 continue
             rtype = r.get("type")
 
@@ -279,6 +308,8 @@ def iter_message_texts(path):
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(r, dict):
+                continue
             if r.get("type") not in ("user", "assistant"):
                 continue
             if r.get("isMeta") or r.get("isSidechain"):
@@ -379,11 +410,53 @@ def notify_linux(title, message, subtitle="", sound="Glass"):
                          stderr=subprocess.DEVNULL)
 
 
+_toast_warned = False
+
+
+def notify_windows(title, message, subtitle="", sound="Glass"):
+    """Toast via BurntToast if present, else a balloon tip, else console bell."""
+    global _toast_warned
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return
+    body = (subtitle + " — " if subtitle else "") + message
+
+    def ps_quote(t):
+        return "'" + (t or "").replace("'", "''") + "'"
+
+    # BurntToast gives real Action Center toasts; fall back to a tray balloon.
+    script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+if (Get-Module -ListAvailable -Name BurntToast) {{
+    Import-Module BurntToast
+    New-BurntToastNotification -Text {ps_quote(title)}, {ps_quote(body)}
+}} else {{
+    Add-Type -AssemblyName System.Windows.Forms
+    $n = New-Object System.Windows.Forms.NotifyIcon
+    $n.Icon = [System.Drawing.SystemIcons]::Information
+    $n.BalloonTipTitle = {ps_quote(title)}
+    $n.BalloonTipText = {ps_quote(body)}
+    $n.Visible = $true
+    $n.ShowBalloonTip(8000)
+    Start-Sleep -Seconds 9
+    $n.Dispose()
+}}
+"""
+    subprocess.Popen([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                      "-WindowStyle", "Hidden", "-Command", script],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if not _toast_warned:
+        _toast_warned = True
+
+
 def notify(title, message, subtitle="", sound="Glass"):
     if sys.platform == "darwin":
         notify_mac(title, message, subtitle, sound)
     elif sys.platform.startswith("linux"):
         notify_linux(title, message, subtitle, sound)
+    elif IS_WINDOWS:
+        notify_windows(title, message, subtitle, sound)
 
 
 def watch(interval=3.0, quiet=False):
@@ -413,24 +486,24 @@ def watch(interval=3.0, quiet=False):
                 took = time.time() - busy_since.pop(sid, time.time())
                 log(f"finished: {label} (turn took {humanize_duration(took)})")
                 if not quiet:
-                    emoji = "⚡" if took < 10 else ("✅" if took < 300 else "🏁")
+                    emoji = "*" if took < 10 else ("OK" if took < 300 else "DONE")
                     others = sum(1 for o_sid, o in live.items()
                                  if o_sid != sid and o.get("status") == "busy")
                     tail = (f" · {others} still busy" if others
                             else " — all quiet, ready for you")
                     notify(f"{emoji} {label} finished",
-                               f"Turn took {humanize_duration(took)}{tail}",
-                               subtitle=f"in {shorten_project(info.get('cwd'))}")
+                           f"Turn took {humanize_duration(took)}{tail}",
+                           subtitle=f"in {shorten_project(info.get('cwd'))}")
             elif new_st not in ("busy", "idle", "shell", None):
                 # any other state (permission prompt, question, plan approval…);
                 # "shell" is the user themselves at the keyboard — don't ping
                 log(f"waiting for input: {label} ({new_st})")
                 if not quiet:
-                    notify(f"⌨️ {label} needs you",
-                               "Claude is waiting on a prompt — "
-                               "it can't continue until you answer",
-                               subtitle=f"in {shorten_project(info.get('cwd'))}",
-                               sound="Ping")
+                    notify(f"{label} needs you",
+                           "Claude is waiting on a prompt — "
+                           "it can't continue until you answer",
+                           subtitle=f"in {shorten_project(info.get('cwd'))}",
+                           sound="Ping")
         for sid, old in prev.items():
             if sid not in live:
                 busy_since.pop(sid, None)
@@ -440,6 +513,7 @@ def watch(interval=3.0, quiet=False):
 
 
 SYSTEMD_UNIT = "claude-sessions-watch.service"
+WIN_TASK_NAME = "ClaudeSessionsWatch"
 
 
 def _systemd_service(action):
@@ -474,14 +548,45 @@ WantedBy=default.target
     return rc
 
 
+def _windows_service(action):
+    """Windows: manage the watcher as a Scheduled Task that runs at logon."""
+    schtasks = shutil.which("schtasks")
+    if not schtasks:
+        print("schtasks not found — run `cs watch` in a terminal instead.",
+              file=sys.stderr)
+        return 1
+    if action in ("start", "restart"):
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        runner = str(pyw) if pyw.exists() else sys.executable
+        script = os.path.abspath(__file__)
+        cmd = f'"{runner}" "{script}" watch'
+        subprocess.run([schtasks, "/Delete", "/TN", WIN_TASK_NAME, "/F"],
+                       capture_output=True)
+        rc = subprocess.run([schtasks, "/Create", "/TN", WIN_TASK_NAME,
+                             "/TR", cmd, "/SC", "ONLOGON", "/RL", "LIMITED",
+                             "/F"]).returncode
+        if rc == 0:
+            subprocess.run([schtasks, "/Run", "/TN", WIN_TASK_NAME],
+                           capture_output=True)
+        return rc
+    if action == "stop":
+        subprocess.run([schtasks, "/End", "/TN", WIN_TASK_NAME], capture_output=True)
+        return subprocess.run([schtasks, "/Delete", "/TN", WIN_TASK_NAME,
+                               "/F"]).returncode
+    return subprocess.run([schtasks, "/Query", "/TN", WIN_TASK_NAME,
+                           "/V", "/FO", "LIST"]).returncode
+
+
 def service_cmd(action):
-    """Control the background notification watcher (brew service / systemd)."""
+    """Control the background notification watcher."""
     action = action or "status"
     if action not in ("start", "stop", "restart", "status"):
         print(f"Unknown service action '{action}' — "
               f"use start, stop, restart, or status", file=sys.stderr)
         return 2
-    if sys.platform.startswith("linux"):
+    if IS_WINDOWS:
+        rc = _windows_service(action)
+    elif sys.platform.startswith("linux"):
         rc = _systemd_service(action)
     else:
         brew = shutil.which("brew") or next(
@@ -497,13 +602,17 @@ def service_cmd(action):
         print("Notifications off. Re-enable anytime: cs service start")
     if rc == 0 and action in ("start", "restart"):
         print("You'll get a desktop ping when a session finishes or needs input.")
+        if IS_WINDOWS:
+            print("Tip: `Install-Module BurntToast -Scope CurrentUser` gives real "
+                  "Action Center toasts instead of tray balloons.")
     return rc
 
 
 # ---------------------------------------------------------------- actions
 
-def exec_claude(argv, cwd=None):
-    """Replace this process with the claude CLI. Only returns on failure."""
+def run_claude(argv, cwd=None):
+    """Run the claude CLI. On POSIX this replaces the process; on Windows it
+    spawns a child and waits, then returns its exit code."""
     exe = shutil.which("claude")
     if not exe:
         print("claude CLI not found on PATH", file=sys.stderr)
@@ -514,7 +623,18 @@ def exec_claude(argv, cwd=None):
         except OSError as e:
             print(f"Cannot chdir to {cwd}: {e}", file=sys.stderr)
             return 1
+    if IS_WINDOWS:
+        # execv on Windows detaches the console from the parent and the shell
+        # returns immediately, garbling the TUI. Spawn and wait instead.
+        try:
+            return subprocess.call([exe] + argv, cwd=cwd or None)
+        except OSError as e:
+            print(f"Cannot run claude: {e}", file=sys.stderr)
+            return 1
     os.execv(exe, [exe] + argv)
+
+
+exec_claude = run_claude  # backwards-compatible alias
 
 
 def resume_session(s):
@@ -523,7 +643,7 @@ def resume_session(s):
         print(f"Project directory for session {s['session_id']} not found: {project}",
               file=sys.stderr)
         return 1
-    return exec_claude(["--resume", s["session_id"]], cwd=project)
+    return run_claude(["--resume", s["session_id"]], cwd=project)
 
 
 def delete_session(s):
@@ -604,6 +724,8 @@ def export_markdown(s):
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(r, dict):
+                continue
             rtype = r.get("type")
             if rtype not in ("user", "assistant"):
                 continue
@@ -614,7 +736,7 @@ def export_markdown(s):
                 text = first_text(content).strip()
                 if not text:
                     continue  # pure tool_result turns
-                lines += ["## 👤 User", "", text, ""]
+                lines += ["## User", "", text, ""]
             else:
                 text_parts, tools = [], {}
                 if isinstance(content, list):
@@ -630,13 +752,13 @@ def export_markdown(s):
                     text_parts.append(content.strip())
                 if not text_parts and not tools:
                     continue
-                lines.append("## 🤖 Claude")
+                lines.append("## Claude")
                 lines.append("")
                 lines += text_parts
                 if tools:
-                    pretty = ", ".join(n if c == 1 else f"{n} ×{c}"
+                    pretty = ", ".join(n if c == 1 else f"{n} x{c}"
                                        for n, c in tools.items())
-                    lines.append(f"\n> 🔧 {pretty}")
+                    lines.append(f"\n> Tools: {pretty}")
                 lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -670,7 +792,8 @@ def print_stats(sessions):
     rows = [[p, str(v["sessions"]), str(v["msgs"]), humanize_tokens(v["out"]),
              f"${v['cost']:.2f}"]
             for p, v in sorted(by_project.items(), key=lambda kv: -kv[1]["cost"])]
-    table("By project:", ["PROJECT", "SESSIONS", "MSGS", "OUT-TOK", "COST"], rows)
+    if rows:
+        table("By project:", ["PROJECT", "SESSIONS", "MSGS", "OUT-TOK", "COST"], rows)
 
     rows = [[m, str(v["sessions"]), humanize_tokens(v["out"]), f"${v['cost']:.2f}"]
             for m, v in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"])]
@@ -784,6 +907,22 @@ RESET, BOLD, DIM, REV = "\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"
 RED, GREEN, YELLOW = "\x1b[31m", "\x1b[32m", "\x1b[33m"
 BLUE, MAGENTA, CYAN = "\x1b[34m", "\x1b[35m", "\x1b[36m"
 
+
+def enable_ansi():
+    """Windows 10+ consoles need VT processing switched on explicitly."""
+    if not IS_WINDOWS:
+        return
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+    for handle_id in (-11,):  # STD_OUTPUT_HANDLE
+        handle = kernel32.GetStdHandle(handle_id)
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(
+                handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+
+
 COMMANDS = {
     "list":        "table of all sessions — cost, tokens, running state",
     "search":      "full-text search every conversation you ever had",
@@ -808,7 +947,7 @@ def print_help():
         return ("".join(codes) + text + RESET) if t else text
 
     print()
-    print("  " + c(" ◆ claude-sessions ", REV, BOLD)
+    print("  " + c(" claude-sessions ", REV, BOLD)
           + "  " + c("mission control for your Claude Code sessions", DIM))
     print()
     print("  " + c("USAGE", BOLD, YELLOW))
@@ -843,7 +982,7 @@ def print_help():
     print()
     print("  " + c("PICKER KEYS", BOLD, YELLOW) + "   "
           + "   ".join(c(k, BOLD, CYAN) + c(" " + v, DIM) for k, v in [
-              ("⏎", "resume"), ("/", "search"), ("n", "new"),
+              ("Enter", "resume"), ("/", "search"), ("n", "new"),
               ("d", "delete"), ("j/k", "move"), ("q", "quit")]))
     print()
 
@@ -851,7 +990,7 @@ def print_help():
 # ---------------------------------------------------------------- interactive mode
 
 _preview_cache = {}
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER = "|/-\\" if IS_WINDOWS else "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def cost_color(c):
@@ -872,7 +1011,7 @@ def activity_spark(days=14):
             for line in fh:
                 try:
                     ts = json.loads(line).get("timestamp", 0) / 1000
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError, AttributeError):
                     continue
                 age = int((now - ts) // 86400)
                 if 0 <= age < days:
@@ -886,26 +1025,99 @@ def activity_spark(days=14):
     return "".join(blocks[min(7, round(c / mx * 7))] for c in counts)
 
 
-def get_key(fd, timeout=None):
-    if timeout is not None and not select.select([fd], [], [], timeout)[0]:
-        return None  # tick — no key pressed
-    ch = os.read(fd, 1)
-    if ch != b"\x1b":
-        try:
-            return ch.decode()
-        except UnicodeDecodeError:
-            return ""
-    if not select.select([fd], [], [], 0.05)[0]:
-        return "ESC"
-    seq = os.read(fd, 2)
-    if seq in (b"[A", b"OA"):
-        return "UP"
-    if seq in (b"[B", b"OB"):
-        return "DOWN"
-    # swallow the rest of longer sequences (PgUp/PgDn/Home/End etc.)
-    while select.select([fd], [], [], 0.01)[0]:
-        os.read(fd, 1)
-    return ""
+# --- key input: two implementations, one interface -------------------------
+
+class KeyReader:
+    """Context manager giving raw single-key reads with an optional timeout.
+
+    get(timeout) returns: a character, "UP"/"DOWN"/"ESC", "" for an ignored
+    sequence, or None when the timeout expired with no keypress.
+    """
+
+    def __enter__(self):
+        self._setup()
+        sys.stdout.write("\x1b[?1049h\x1b[?25l")
+        sys.stdout.flush()
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.write("\x1b[?1049l\x1b[?25h")
+        sys.stdout.flush()
+        self._teardown()
+        return False
+
+    # cooked mode around input()/subprocess, then back to raw
+    def cooked(self):
+        sys.stdout.write("\x1b[?1049l\x1b[?25h")
+        sys.stdout.flush()
+        self._teardown()
+
+    def raw(self):
+        self._setup()
+        sys.stdout.write("\x1b[?1049h\x1b[?25l")
+        sys.stdout.flush()
+
+
+class WindowsKeyReader(KeyReader):
+    def _setup(self):
+        pass
+
+    def _teardown(self):
+        pass
+
+    def get(self, timeout=None):
+        deadline = None if timeout is None else time.time() + timeout
+        while True:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):          # arrow / function key prefix
+                    code = msvcrt.getwch()
+                    return {"H": "UP", "P": "DOWN"}.get(code, "")
+                if ch == "\x1b":
+                    return "ESC"
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                return ch
+            if deadline is not None and time.time() >= deadline:
+                return None
+            time.sleep(0.02)
+
+
+class PosixKeyReader(KeyReader):
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.old = termios.tcgetattr(self.fd)
+
+    def _setup(self):
+        tty.setcbreak(self.fd)
+
+    def _teardown(self):
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def get(self, timeout=None):
+        fd = self.fd
+        if timeout is not None and not select.select([fd], [], [], timeout)[0]:
+            return None
+        ch = os.read(fd, 1)
+        if ch != b"\x1b":
+            try:
+                return ch.decode()
+            except UnicodeDecodeError:
+                return ""
+        if not select.select([fd], [], [], 0.05)[0]:
+            return "ESC"
+        seq = os.read(fd, 2)
+        if seq in (b"[A", b"OA"):
+            return "UP"
+        if seq in (b"[B", b"OB"):
+            return "DOWN"
+        while select.select([fd], [], [], 0.01)[0]:
+            os.read(fd, 1)
+        return ""
+
+
+def make_key_reader():
+    return WindowsKeyReader() if IS_WINDOWS else PosixKeyReader()
 
 
 def tail_messages(path, want=6, chunk=262_144):
@@ -927,6 +1139,8 @@ def tail_messages(path, want=6, chunk=262_144):
         try:
             r = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(r, dict):
             continue
         if r.get("type") not in ("user", "assistant"):
             continue
@@ -954,7 +1168,7 @@ def preview_lines(s, width, height):
     lines = []
     for role, text in msgs:
         wrapped = textwrap.wrap(text, width=max(20, width),
-                                max_lines=3, placeholder=" …")
+                                max_lines=3, placeholder=" ...")
         for i, w in enumerate(wrapped):
             lines.append((role, i == 0, w))
     return lines[-height:]
@@ -969,14 +1183,14 @@ def draw(sessions, sel, top, status, query="", prompt=None, tick=0, spark=""):
 
     running = sum(1 for s in sessions if s["running"])
     total_cost = sum(s.get("cost_usd", 0) or 0 for s in sessions)
-    head = (f"{REV}{BOLD} ◆ claude-sessions {RESET}  "
+    head = (f"{REV}{BOLD} claude-sessions {RESET}  "
             f"{BOLD}{len(sessions)}{RESET}{DIM} sessions{RESET}   "
-            f"{GREEN}●{RESET} {BOLD}{running}{RESET}{DIM} running{RESET}   "
+            f"{GREEN}*{RESET} {BOLD}{running}{RESET}{DIM} running{RESET}   "
             f"{YELLOW}~${total_cost:,.0f}{RESET}{DIM} lifetime{RESET}")
     if spark:
         head += f"   {CYAN}{spark}{RESET}{DIM} 14d{RESET}"
     if query:
-        head += f"   {MAGENTA}⌕ {query}{RESET}{DIM}  Esc clears{RESET}"
+        head += f"   {MAGENTA}search: {query}{RESET}{DIM}  Esc clears{RESET}"
     out.append(head + "\r\n")
 
     # fixed columns take 61 chars; the title gets the rest
@@ -988,7 +1202,7 @@ def draw(sessions, sel, top, status, query="", prompt=None, tick=0, spark=""):
     for i in range(top, min(top + visible, len(sessions))):
         s = sessions[i]
         busy = s["running"] and (s.get("live") or {}).get("status") == "busy"
-        mark = SPINNER[tick % len(SPINNER)] if busy else ("●" if s["running"] else "·")
+        mark = SPINNER[tick % len(SPINNER)] if busy else ("*" if s["running"] else ".")
         sid = f"{s['session_id'][:8]:<8}"
         when = f"{humanize_time(s['last_activity']):>9}"
         cost_val = s.get("cost_usd", 0) or 0
@@ -1007,20 +1221,20 @@ def draw(sessions, sel, top, status, query="", prompt=None, tick=0, spark=""):
     if not sessions:
         out.append(f"\r\n   {DIM}Nothing here yet.{RESET}\r\n"
                    f"   Press {BOLD}{CYAN}n{RESET} to start your first "
-                   f"Claude session ✨\r\n")
+                   f"Claude session\r\n")
 
     if show_preview and 0 <= sel < len(sessions):
         out.append(f"\x1b[{rows - ph - 1};1H")
         cap = f" {display_title(sessions[sel])[:cols - 12]} "
-        bar = "───" + cap + "─" * max(0, cols - 5 - len(cap))
+        bar = "---" + cap + "-" * max(0, cols - 5 - len(cap))
         out.append(DIM + CYAN + bar[:cols - 1] + RESET + "\r\n")
         for role, first, text in preview_lines(sessions[sel], cols - 12, ph):
             if first and role == "user":
-                lab = f"{BOLD}{BLUE}   You{RESET} {DIM}▏{RESET}"
+                lab = f"{BOLD}{BLUE}   You{RESET} {DIM}|{RESET}"
             elif first and role == "assistant":
-                lab = f"{BOLD}{MAGENTA}Claude{RESET} {DIM}▏{RESET}"
+                lab = f"{BOLD}{MAGENTA}Claude{RESET} {DIM}|{RESET}"
             else:
-                lab = f"       {DIM}▏{RESET}"
+                lab = f"       {DIM}|{RESET}"
             body = (DIM + text + RESET) if role == "user" else text
             out.append(" " + lab + " " + body + "\r\n")
 
@@ -1031,7 +1245,7 @@ def draw(sessions, sel, top, status, query="", prompt=None, tick=0, spark=""):
         out.append(" " + status + RESET)
     else:
         keys = "   ".join(f"{BOLD}{CYAN}{k}{RESET}{DIM} {v}{RESET}" for k, v in [
-            ("⏎", "resume"), ("/", "search"), ("n", "new"), ("e", "export"),
+            ("Enter", "resume"), ("/", "search"), ("n", "new"), ("e", "export"),
             ("d", "delete"), ("q", "quit")])
         pos = f"{DIM}{min(sel + 1, len(sessions))}/{len(sessions)}{RESET}" \
             if sessions else ""
@@ -1044,18 +1258,7 @@ def interactive():
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("Interactive mode needs a TTY; use 'list' instead.", file=sys.stderr)
         return 1
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-
-    def raw_on():
-        tty.setcbreak(fd)
-        sys.stdout.write("\x1b[?1049h\x1b[?25l")
-        sys.stdout.flush()
-
-    def raw_off():
-        sys.stdout.write("\x1b[?1049l\x1b[?25h")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    enable_ansi()
 
     all_sessions = collect_sessions()
     view = all_sessions
@@ -1070,119 +1273,133 @@ def interactive():
             flag.touch()
         except OSError:
             pass
-        status = (f"👋 {BOLD}Welcome!{RESET} {BOLD}{CYAN}⏎{RESET} resumes a session"
+        status = (f"{BOLD}Welcome!{RESET} {BOLD}{CYAN}Enter{RESET} resumes a session"
                   f" · {BOLD}{CYAN}/{RESET} searches everything you ever discussed"
                   f" · {CYAN}cs help{RESET}{DIM} shows the full tour{RESET}")
-    raw_on()
+
     try:
-        while True:
-            cols, term_rows = shutil.get_terminal_size()
-            ph = min(12, term_rows // 3) if term_rows >= 18 and view else 0
-            visible = max(1, term_rows - 4 - (ph + 1 if ph else 0))
-            sel = max(0, min(sel, len(view) - 1))
-            top = max(0, min(top, sel))
-            if sel >= top + visible:
-                top = sel - visible + 1
-            draw(view, sel, top, status, query, tick=tick, spark=spark)
-            key = get_key(fd, timeout=1.0)
+        with make_key_reader() as keys:
+            while True:
+                cols, term_rows = shutil.get_terminal_size()
+                ph = min(12, term_rows // 3) if term_rows >= 18 and view else 0
+                visible = max(1, term_rows - 4 - (ph + 1 if ph else 0))
+                sel = max(0, min(sel, len(view) - 1))
+                top = max(0, min(top, sel))
+                if sel >= top + visible:
+                    top = sel - visible + 1
+                draw(view, sel, top, status, query, tick=tick, spark=spark)
+                key = keys.get(timeout=1.0)
 
-            if key is None:  # tick: animate spinners, refresh live status
-                tick += 1
-                live = load_live_sessions()
-                for s in all_sessions:
-                    info = live.get(s["session_id"])
-                    s["running"] = bool(info)
-                    s["live"] = info
-                continue
-            status = ""
+                if key is None:  # tick: animate spinners, refresh live status
+                    tick += 1
+                    live = load_live_sessions()
+                    for s in all_sessions:
+                        info = live.get(s["session_id"])
+                        s["running"] = bool(info)
+                        s["live"] = info
+                    continue
+                status = ""
 
-            if key == "q":
-                return 0
-            if key == "ESC":
-                if query:
-                    query, view, sel, top = "", all_sessions, 0, 0
-                    continue
-                return 0
-            if key in ("UP", "k"):
-                sel -= 1
-            elif key in ("DOWN", "j"):
-                sel += 1
-            elif key == "g":
-                sel = 0
-            elif key == "G":
-                sel = len(view) - 1
-            elif key == "/":
-                raw_off()
-                try:
-                    q = input("Search: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    q = ""
-                raw_on()
-                if q:
-                    query = q
-                    view = search_sessions(all_sessions, q)
-                    status = (f"{MAGENTA}⌕{RESET} {BOLD}{len(view)}{RESET} "
-                              f"sessions match '{q}'" if view else
-                              f"{MAGENTA}⌕{RESET} no matches for '{q}' — "
-                              f"{DIM}Esc to clear{RESET}")
-                else:
-                    query, view = "", all_sessions
-                sel, top = 0, 0
-            elif key in ("\r", "\n", "r") and view:
-                s = view[sel]
-                raw_off()
-                resume_session(s)  # only returns on failure
-                input("Press Enter to continue...")
-                raw_on()
-                all_sessions = collect_sessions()
-                view = search_sessions(all_sessions, query) if query else all_sessions
-            elif key == "e" and view:
-                s = view[sel]
-                out_path = Path.cwd() / f"claude-session-{s['session_id'][:8]}.md"
-                try:
-                    out_path.write_text(export_markdown(s))
-                    status = f"{GREEN}✓{RESET} Exported → {out_path}"
-                except OSError as exc:
-                    status = f"{RED}✗{RESET} Export failed: {exc}"
-            elif key == "d" and view:
-                s = view[sel]
-                draw(view, sel, top, "", query, tick=tick, spark=spark,
-                     prompt=f" Delete {s['session_id'][:8]} ({display_title(s)[:40]})? y/N ")
-                if get_key(fd) == "y":
-                    ok, msg = delete_session(s)
-                    status = (f"{GREEN}✓{RESET} {msg}" if ok
-                              else f"{RED}✗{RESET} {msg}")
-                    if ok:
-                        all_sessions = collect_sessions()
-                        view = search_sessions(all_sessions, query) if query else all_sessions
-                else:
-                    status = f"{DIM}Cancelled — nothing deleted.{RESET}"
-            elif key == "n":
-                default = (view[sel]["project"] if view else None) or os.getcwd()
-                raw_off()
-                try:
-                    path = input(f"Start new session in [{default}]: ").strip() or default
-                except (EOFError, KeyboardInterrupt):
-                    raw_on()
-                    continue
-                path = os.path.expanduser(path)
-                if not Path(path).is_dir():
-                    input(f"Not a directory: {path} — press Enter...")
-                    raw_on()
-                    continue
-                exec_claude([], cwd=path)  # only returns on failure
-                input("Press Enter to continue...")
-                raw_on()
+                if key == "q":
+                    return 0
+                if key == "ESC":
+                    if query:
+                        query, view, sel, top = "", all_sessions, 0, 0
+                        continue
+                    return 0
+                if key in ("UP", "k"):
+                    sel -= 1
+                elif key in ("DOWN", "j"):
+                    sel += 1
+                elif key == "g":
+                    sel = 0
+                elif key == "G":
+                    sel = len(view) - 1
+                elif key == "/":
+                    keys.cooked()
+                    try:
+                        q = input("Search: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        q = ""
+                    keys.raw()
+                    if q:
+                        query = q
+                        view = search_sessions(all_sessions, q)
+                        status = (f"{MAGENTA}{len(view)}{RESET} "
+                                  f"sessions match '{q}'" if view else
+                                  f"{MAGENTA}no matches for '{q}'{RESET} — "
+                                  f"{DIM}Esc to clear{RESET}")
+                    else:
+                        query, view = "", all_sessions
+                    sel, top = 0, 0
+                elif key in ("\r", "\n", "r") and view:
+                    s = view[sel]
+                    keys.cooked()
+                    rc = resume_session(s)
+                    if rc != 0 or IS_WINDOWS:
+                        try:
+                            input("Press Enter to continue...")
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+                    keys.raw()
+                    all_sessions = collect_sessions()
+                    view = search_sessions(all_sessions, query) if query else all_sessions
+                elif key == "e" and view:
+                    s = view[sel]
+                    out_path = Path.cwd() / f"claude-session-{s['session_id'][:8]}.md"
+                    try:
+                        out_path.write_text(export_markdown(s), encoding="utf-8")
+                        status = f"{GREEN}OK{RESET} Exported -> {out_path}"
+                    except OSError as exc:
+                        status = f"{RED}FAIL{RESET} Export failed: {exc}"
+                elif key == "d" and view:
+                    s = view[sel]
+                    draw(view, sel, top, "", query, tick=tick, spark=spark,
+                         prompt=f" Delete {s['session_id'][:8]} "
+                                f"({display_title(s)[:40]})? y/N ")
+                    if keys.get() == "y":
+                        ok, msg = delete_session(s)
+                        status = (f"{GREEN}OK{RESET} {msg}" if ok
+                                  else f"{RED}FAIL{RESET} {msg}")
+                        if ok:
+                            all_sessions = collect_sessions()
+                            view = (search_sessions(all_sessions, query)
+                                    if query else all_sessions)
+                    else:
+                        status = f"{DIM}Cancelled — nothing deleted.{RESET}"
+                elif key == "n":
+                    default = (view[sel]["project"] if view else None) or os.getcwd()
+                    keys.cooked()
+                    try:
+                        path = input(f"Start new session in [{default}]: ").strip() \
+                            or default
+                    except (EOFError, KeyboardInterrupt):
+                        keys.raw()
+                        continue
+                    path = os.path.expanduser(path)
+                    if not Path(path).is_dir():
+                        input(f"Not a directory: {path} — press Enter...")
+                        keys.raw()
+                        continue
+                    rc = run_claude([], cwd=path)
+                    if rc != 0 or IS_WINDOWS:
+                        try:
+                            input("Press Enter to continue...")
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+                    keys.raw()
+                    all_sessions = collect_sessions()
+                    view = (search_sessions(all_sessions, query)
+                            if query else all_sessions)
     except KeyboardInterrupt:
         return 0
-    finally:
-        raw_off()
 
 
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
     argv = list(sys.argv[1:]) if argv is None else list(argv)
+    enable_ansi()
 
     # friendly help + typo suggestions, before argparse gets a chance to shout
     if any(a in ("-h", "--help") for a in argv) or (argv and argv[0] == "help"):
@@ -1194,7 +1411,7 @@ def main(argv=None):
         import difflib
         guess = difflib.get_close_matches(first, list(COMMANDS), n=1)
         hint = f" — did you mean {BOLD}cs {guess[0]}{RESET}?" if guess else ""
-        print(f"{RED}✗{RESET} Unknown command '{first}'{hint}   "
+        print(f"{RED}x{RESET} Unknown command '{first}'{hint}   "
               f"{DIM}(cs help shows everything){RESET}", file=sys.stderr)
         return 2
 
@@ -1274,7 +1491,7 @@ def main(argv=None):
                 sys.stdout.write(md)
             else:
                 out = Path(args.output or f"claude-session-{s['session_id'][:8]}.md")
-                out.write_text(md)
+                out.write_text(md, encoding="utf-8")
                 print(f"Wrote {out}")
             return 0
         if cmd == "delete":
@@ -1293,7 +1510,7 @@ def main(argv=None):
         if not Path(path).is_dir():
             print(f"Not a directory: {path}", file=sys.stderr)
             return 1
-        return exec_claude([], cwd=path)
+        return run_claude([], cwd=path)
 
     # list
     if args.running:
@@ -1313,5 +1530,12 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if IS_WINDOWS:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (AttributeError, OSError):
+                pass
     sys.exit(main())

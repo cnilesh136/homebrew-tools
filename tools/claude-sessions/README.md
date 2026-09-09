@@ -23,7 +23,7 @@ pings you the moment the answer changes.
 Unlike Claude Code's built-in `/resume`, `cs` sees **all projects** — and
 unlike anything else, it knows what's running *right now*.
 
-Stdlib-only Python 3.9+, no dependencies. **macOS and Ubuntu/Linux.**
+Stdlib-only Python 3.9+, no dependencies. **macOS, Ubuntu/Linux, and Windows.**
 
 ## Install
 
@@ -44,11 +44,28 @@ mkdir -p ~/.local/bin && curl -fsSL \
 
 Either way you get two global commands: `claude-sessions` and the short alias `cs`.
 
+**Windows** (needs Python 3.9+ — Homebrew does not run on Windows). In
+PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/cnilesh136/homebrew-tools/main/tools/claude-sessions/install.ps1 | iex
+```
+
+That installs `cs` and `claude-sessions` into `~\bin` and puts it on your PATH.
+Re-run it any time to upgrade. Open a new terminal afterwards so PATH takes
+effect.
+
+Run the interactive picker from Windows Terminal, PowerShell, or cmd. Git Bash
+and other mintty-based shells do not expose a real Windows console handle, so
+raw key input never reaches the picker there — `cs list` and the rest of the
+non-interactive commands work in any shell.
+
 To get a desktop notification whenever a running Claude session finishes its
 turn, enable the background watcher once (persists across reboots):
 
 ```bash
-brew services start claude-sessions
+brew services start claude-sessions   # macOS
+cs service start                      # Linux (systemd) or Windows (Scheduled Task)
 ```
 
 ## Usage
@@ -107,11 +124,15 @@ name, project as subtitle — when a running session **finishes its turn**
   design. Finish = Glass sound, needs-input = Ping.
 - **Ubuntu/Linux:** delivered via `notify-send` (libnotify, preinstalled on
   Ubuntu desktop), with freedesktop sounds via `paplay` when available.
+- **Windows:** delivered via [BurntToast](https://github.com/Windos/BurntToast)
+  when that module is installed (`Install-Module BurntToast -Scope CurrentUser`),
+  giving real Action Center toasts. Without it, falls back to a tray balloon tip
+  via `System.Windows.Forms.NotifyIcon`, which needs nothing extra.
 
-Control the always-on service (survives reboots on both platforms):
+Control the always-on service (survives reboots on all three platforms):
 
 ```bash
-cs service start     # macOS: brew service · Linux: systemd user unit
+cs service start     # macOS: brew service · Linux: systemd user unit · Windows: Scheduled Task
 cs service stop      # disable anytime
 cs service status    # check
 ```
